@@ -27,14 +27,22 @@ const VALID_CATEGORIES = [
  * Classifies an uploaded civic-issue photo: category + severity (0-10) + a
  * one-line description. Expects a public/signed image URL (Supabase Storage).
  *
- * Vision model: gpt-5.6-sol via agentrouter — passed the full 4-check
- * vision suite (solid-color control, real pothole accuracy, negative
- * control, 3x consistency) on 2026-09-05. History: glm-5.3 hallucinated
- * images from prompt text; deepseek-v4-flash honestly reported "no image
- * content visible" (no vision); claude-opus models are currently blocked
- * by an agentrouter budget-pool 402 — revisit when unblocked. The
- * complaint letter stays on glm-5.3 — text-only, cheaper, verified working.
- * The image is downloaded server-side and sent as base64.
+ * PROVIDERS (CLASSIFY_PROVIDER env var, default 'agentrouter'):
+ *   - agentrouter: gpt-5.6-sol via the Anthropic SDK — passed the full
+ *     4-check vision suite (solid-color control, real pothole accuracy,
+ *     negative control, 3x consistency) on 2026-09-05. NOTE: agentrouter
+ *     budget pools exhaust quickly — on 402, switch CLASSIFY_PROVIDER to
+ *     'latentcode'.
+ *   - latentcode: gemini-3.1-pro via latentstack.dev's OpenAI-compatible
+ *     /v1/chat/completions — ALSO passed the same 4-check suite on
+ *     2026-09-05 (test/vision-check-latentcode.js). Independent provider
+ *     for redundancy, not a third single point of failure.
+ * History: glm-5.3 hallucinated images from prompt text; deepseek-v4-flash
+ * honestly reported "no image content visible" (no vision); claude-opus
+ * models were blocked by an agentrouter budget-pool 402 at test time.
+ * The complaint letter stays on glm-5.3 — text-only, verified working.
+ *
+ * The image is downloaded server-side and sent as base64 (both providers).
  *
  * Latency hardening (2026-09-05): agentrouter routes some requests to
  * slow/flaky nodes — observed 20-48s calls and intermittent upstream 4xx
@@ -45,6 +53,8 @@ const VALID_CATEGORIES = [
  */
 const CLASSIFY_TIMEOUT_MS = 25_000;
 const CLASSIFY_ATTEMPTS = 2;
+const CLASSIFY_PROVIDER = process.env.CLASSIFY_PROVIDER || 'agentrouter';
+const LATENTCODE_BASE = 'https://latentstack.dev/v1';
 
 async function classifyIssuePhoto(imageUrl) {
   const { base64, mediaType } = await downloadImageAsBase64(imageUrl);
@@ -52,33 +62,14 @@ async function classifyIssuePhoto(imageUrl) {
   let lastError = null;
   for (let attempt = 1; attempt <= CLASSIFY_ATTEMPTS; attempt++) {
     try {
-      const msg = await withTimeout(
-        anthropic.messages.create({
-          model: 'gpt-5.6-sol',
-          max_tokens: 5000,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-                {
-                  type: 'text',
-                  text: `Look at this photo of a civic/infrastructure issue. Respond with ONLY a JSON object, no markdown, no preamble:
-{
-  "category": one of ${JSON.stringify(VALID_CATEGORIES)},
-  "severity_score": number 0-10 (10 = severe safety hazard, 0 = cosmetic),
-  "description": "one short factual sentence describing what's visible"
-}`,
-                },
-              ],
-            },
-          ],
-        }),
+      const text = await withTimeout(
+        CLASSIFY_PROVIDER === 'latentcode'
+          ? classifyViaLatentcode(base64, mediaType)
+          : classifyViaAgentrouter(base64, mediaType),
         CLASSIFY_TIMEOUT_MS,
         `classification attempt ${attempt} timed out after ${CLASSIFY_TIMEOUT_MS / 1000}s`
       );
 
-      const text = extractText(msg);
       const parsed = safeParseJson(text);
 
       return {
@@ -88,9 +79,9 @@ async function classifyIssuePhoto(imageUrl) {
       };
     } catch (err) {
       lastError = err;
-      const isRetryable = err.name === 'TimeoutError' || (typeof err.status === 'number' && err.status >= 400);
+      const isRetryable = err.name === 'TimeoutError' || (typeof err.status === 'number' && err.status >= 400) || err.status >= 400;
       console.error(
-        `[classify] attempt ${attempt}/${CLASSIFY_ATTEMPTS} failed:`,
+        `[classify:${CLASSIFY_PROVIDER}] attempt ${attempt}/${CLASSIFY_ATTEMPTS} failed:`,
         err.name === 'TimeoutError' ? err.message : `${err.status ?? ''} ${err.message ?? err}`
       );
       if (attempt < CLASSIFY_ATTEMPTS && isRetryable) continue;
@@ -99,6 +90,64 @@ async function classifyIssuePhoto(imageUrl) {
   }
   throw lastError;
 }
+
+const CLASSIFY_PROMPT = `Look at this photo of a civic/infrastructure issue. Respond with ONLY a JSON object, no markdown, no preamble:
+{
+  "category": one of ${JSON.stringify(VALID_CATEGORIES)},
+  "severity_score": number 0-10 (10 = severe safety hazard, 0 = cosmetic),
+  "description": "one short factual sentence describing what's visible"
+}`;
+
+/** agentrouter path: Anthropic Messages format, base64 image block. */
+async function classifyViaAgentrouter(base64, mediaType) {
+  const msg = await anthropic.messages.create({
+    model: 'gpt-5.6-sol',
+    max_tokens: 5000,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+          { type: 'text', text: CLASSIFY_PROMPT },
+        ],
+      },
+    ],
+  });
+  return extractText(msg);
+}
+
+/** LatentCode path: OpenAI chat-completions format, base64 data-URI image. */
+async function classifyViaLatentcode(base64, mediaType) {
+  const res = await fetch(`${LATENTCODE_BASE}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.LATENTCODE_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'gemini-3.1-pro',
+      max_tokens: 5000,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: CLASSIFY_PROMPT },
+            { type: 'image_url', image_url: { url: `data:${mediaType};base64,${base64}` } },
+          ],
+        },
+      ],
+    }),
+  });
+  const bodyText = await res.text();
+  if (!res.ok) {
+    const e = new Error(`latentcode ${res.status}: ${bodyText.slice(0, 200)}`);
+    e.status = res.status;
+    throw e;
+  }
+  const parsed = JSON.parse(bodyText);
+  return parsed.choices?.[0]?.message?.content ?? '';
+}
+
 
 /** Rejects with a TimeoutError if the promise doesn't settle in `ms`. */
 function withTimeout(promise, ms, message) {

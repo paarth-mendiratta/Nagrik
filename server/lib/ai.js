@@ -27,21 +27,22 @@ const VALID_CATEGORIES = [
  * Classifies an uploaded civic-issue photo: category + severity (0-10) + a
  * one-line description. Expects a public/signed image URL (Supabase Storage).
  *
- * PROVIDERS (CLASSIFY_PROVIDER env var, default 'agentrouter'):
- *   - agentrouter: gpt-5.6-sol via the Anthropic SDK — passed the full
- *     4-check vision suite (solid-color control, real pothole accuracy,
- *     negative control, 3x consistency) on 2026-09-05. NOTE: agentrouter
- *     budget pools exhaust quickly — on 402, switch CLASSIFY_PROVIDER to
- *     'latentcode'.
- *   - latentcode: gemini-3.1-pro via latentstack.dev's OpenAI-compatible
- *     /v1/chat/completions — ALSO passed the same 4-check suite on
- *     2026-09-05 (test/vision-check-latentcode.js). Independent provider
- *     for redundancy, not a third single point of failure.
+ * PROVIDERS (CLASSIFY_PROVIDER env var, default 'latentcode'):
+ *   - latentcode (PRIMARY): gemini-3.6-flash via latentstack.dev's
+ *     OpenAI-compatible /v1/chat/completions — passed the full 4-check
+ *     vision suite (solid-color control, real pothole accuracy, negative
+ *     control, 3x consistency) on 2026-09-05, ~40% faster than
+ *     gemini-3.1-pro with identical accuracy (test/vision-check-latentcode.js).
+ *     Account has unlimited hackathon-credit rate limits. gemini-3.1-pro
+ *     also passed and is a one-line upgrade if accuracy ever matters more
+ *     than latency.
+ *   - agentrouter (FALLBACK): gpt-5.6-sol via the Anthropic SDK — also
+ *     passed the 4-check suite, but agentrouter budget pools exhaust
+ *     quickly (402s). Switch CLASSIFY_PROVIDER=agentrouter if latentstack
+ *     is ever down.
  * History: glm-5.3 hallucinated images from prompt text; deepseek-v4-flash
- * honestly reported "no image content visible" (no vision); claude-opus
- * models were blocked by an agentrouter budget-pool 402 at test time.
- * The complaint letter stays on glm-5.3 — text-only, verified working.
- *
+ * honestly reported "no image content visible" (no vision).
+ * The complaint letter stays on glm-5.3 (agentrouter) — text-only, verified.
  * The image is downloaded server-side and sent as base64 (both providers).
  *
  * Latency hardening (2026-09-05): agentrouter routes some requests to
@@ -53,7 +54,7 @@ const VALID_CATEGORIES = [
  */
 const CLASSIFY_TIMEOUT_MS = 25_000;
 const CLASSIFY_ATTEMPTS = 2;
-const CLASSIFY_PROVIDER = process.env.CLASSIFY_PROVIDER || 'agentrouter';
+const CLASSIFY_PROVIDER = process.env.CLASSIFY_PROVIDER || 'latentcode';
 const LATENTCODE_BASE = 'https://latentstack.dev/v1';
 
 async function classifyIssuePhoto(imageUrl) {
@@ -125,7 +126,7 @@ async function classifyViaLatentcode(base64, mediaType) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'gemini-3.1-pro',
+      model: 'gemini-3.6-flash',
       max_tokens: 5000,
       messages: [
         {

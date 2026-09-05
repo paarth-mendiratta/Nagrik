@@ -7,16 +7,31 @@ export function Feed() {
   const [sort, setSort] = useState<'priority' | 'recent'>('priority');
   const [stats, setStats] = useState<{ total: number; resolved: number; pending: number } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [unreachable, setUnreachable] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    setUnreachable(false);
+    try {
+      const [reportsRes, statsRes] = await Promise.all([api.listReports({ sort }), api.stats()]);
+      setReports(reportsRes.reports);
+      setStats(statsRes);
+    } catch {
+      setUnreachable(true);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    setLoading(true);
-    Promise.all([api.listReports({ sort }), api.stats()])
-      .then(([reportsRes, statsRes]) => {
-        setReports(reportsRes.reports);
-        setStats(statsRes);
-      })
-      .finally(() => setLoading(false));
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sort]);
+
+  // refresh the stats banner when a card's status changes (live-resolve demo moment)
+  function handleStatusChange() {
+    api.stats().then(setStats).catch(() => {});
+  }
 
   return (
     <div style={{ maxWidth: 960, margin: '0 auto', padding: 20 }}>
@@ -58,6 +73,32 @@ export function Feed() {
         ))}
       </div>
 
+      {unreachable && (
+        <div
+          role="alert"
+          style={{
+            border: '1px dashed #f59e0b',
+            borderRadius: 12,
+            padding: '28px 20px',
+            textAlign: 'center',
+            color: '#92400e',
+            marginBottom: 16,
+          }}
+        >
+          <div style={{ fontSize: 30, marginBottom: 6 }}>📡</div>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Can't reach the server</div>
+          <div style={{ fontSize: 13, marginBottom: 12 }}>
+            The backend may still be starting up. Give it a moment and retry.
+          </div>
+          <button
+            onClick={load}
+            style={{ padding: '8px 18px', borderRadius: 8, border: '1px solid #d1d5db', cursor: 'pointer' }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {loading ? (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 16 }}>
           {[0, 1, 2, 3, 4, 5].map((i) => (
@@ -71,7 +112,7 @@ export function Feed() {
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 16 }}>
           {reports.map((r) => (
-            <ReportCard key={r.id} report={r} />
+            <ReportCard key={r.id} report={r} onStatusChange={handleStatusChange} />
           ))}
         </div>
       )}

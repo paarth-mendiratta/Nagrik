@@ -202,8 +202,7 @@ router.patch("/:id/status", requireAuth, async (req, res) => {
   if (fetchErr || !report) {
     return res.status(404).json({ error: "report not found" });
   }
-
-  const { data: profile } = await supabaseAdmin
+  const { data: profile, error: profErr } = await supabaseAdmin
     .from("profiles")
     .select("is_moderator")
     .eq("id", req.user.id)

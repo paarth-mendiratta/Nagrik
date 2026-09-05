@@ -8,6 +8,8 @@
  * (loads server/.env via dotenv). One-time setup before demo day so an
  * official/team member can resolve/reject reports they didn't file.
  */
+require('dotenv').config();
+
 let supabaseAdmin;
 try {
   ({ supabaseAdmin } = require('../lib/supabase'));

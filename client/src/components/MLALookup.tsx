@@ -16,14 +16,18 @@ export function MLALookup() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Mla[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function search(e: React.FormEvent) {
     e.preventDefault();
     if (!query.trim()) return;
     setLoading(true);
+    setError(null);
     try {
       const { mlas } = await api.searchMla(query);
       setResults(mlas);
+    } catch {
+      setError("Can't reach the server — check your connection and try again.");
     } finally {
       setLoading(false);
     }
@@ -32,9 +36,12 @@ export function MLALookup() {
   async function useMyLocation() {
     navigator.geolocation.getCurrentPosition(async (pos) => {
       setLoading(true);
+      setError(null);
       try {
         const { mla } = await api.nearestMla(pos.coords.latitude, pos.coords.longitude);
         setResults(mla ? [mla] : []);
+      } catch {
+        setError("Can't reach the server — check your connection and try again.");
       } finally {
         setLoading(false);
       }
@@ -48,9 +55,7 @@ export function MLALookup() {
       <form onSubmit={search} style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
         <input
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Enter your constituency"
-          style={{ flex: 1, padding: 8 }}
+          style={{ flex: 1, minWidth: 0, padding: 8 }}
         />
         <button type="submit">Search</button>
       </form>
@@ -60,6 +65,8 @@ export function MLALookup() {
       </button>
 
       {loading && <p>Looking up…</p>}
+
+      {error && <p role="alert" style={{ color: '#dc2626', fontSize: 13 }}>{error}</p>}
 
       {results.map((mla) => (
         <div key={mla.id} style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 16, marginBottom: 12 }}>

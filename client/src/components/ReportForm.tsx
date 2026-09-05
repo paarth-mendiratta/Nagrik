@@ -4,6 +4,42 @@ import { api } from '../lib/api';
 
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024; // 8MB
 const ACCEPTED_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+const COMPRESS_MAX_EDGE = 1600; // px, longest side
+const COMPRESS_JPEG_QUALITY = 0.8;
+
+/**
+ * Downscales a camera photo before upload: canvas resize to at most
+ * 1600px on the longest side, re-encoded as JPEG at quality 0.8. Keeps
+ * uploads (and the server-side AI classify step) fast on phone photos
+ * that can otherwise be several MB. GIFs are passed through untouched
+ * (canvas would flatten animation).
+ */
+async function compressImage(file: File): Promise<File> {
+  if (file.type === 'image/gif') return file;
+
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, COMPRESS_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+  // already small enough — still re-encode to normalize format? No: keep original bytes.
+  if (scale === 1 && file.size < 500 * 1024) {
+    bitmap.close?.();
+    return file;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Could not process the image in this browser.');
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+
+  const blob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob(resolve, 'image/jpeg', COMPRESS_JPEG_QUALITY)
+  );
+  if (!blob) throw new Error('Could not process the image.');
+
+  return new File([blob], file.name.replace(/\.\w+$/, '') + '.jpg', { type: 'image/jpeg' });
+}
 
 export function ReportForm({ onSubmitted }: { onSubmitted?: () => void }) {
   const [file, setFile] = useState<File | null>(null);
@@ -61,7 +97,8 @@ export function ReportForm({ onSubmitted }: { onSubmitted?: () => void }) {
     setSubmitting(true);
     setError(null);
     try {
-      const photo_url = await uploadReportPhoto(file);
+      const compressed = await compressImage(file);
+      const photo_url = await uploadReportPhoto(compressed);
       const mlaLookup = await api.nearestMla(location.lat, location.lng).catch(() => null);
 
       await api.createReport({
@@ -79,7 +116,12 @@ export function ReportForm({ onSubmitted }: { onSubmitted?: () => void }) {
       setLocation(null);
       onSubmitted?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong.');
+      const msg = err instanceof Error ? err.message : 'Something went wrong.';
+      setError(
+        /fetch|network|Failed to fetch/i.test(msg)
+          ? "Can't reach the server — check your connection or wait a moment, then try again."
+          : msg
+      );
     } finally {
       setSubmitting(false);
     }

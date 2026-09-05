@@ -1,7 +1,10 @@
+import { useEffect, useState } from 'react';
 import { PriorityBar } from './PriorityBar';
+import { api } from '../lib/api';
 
 export interface Report {
   id: string;
+  user_id?: string | null;
   category: string;
   description: string;
   photo_url: string;
@@ -25,9 +28,43 @@ const STATUS_STYLES: Record<string, { bg: string; text: string }> = {
   rejected: { bg: '#fee2e2', text: '#991b1b' },
 };
 
-export function ReportCard({ report }: { report: Report }) {
+export function ReportCard({ report, onStatusChange }: { report: Report; onStatusChange?: (id: string, status: Report['status']) => void }) {
+  const [status, setStatus] = useState<Report['status']>(report.status);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [isModerator, setIsModerator] = useState(false);
+
+  // auth is checked lazily so the card works on the public feed (no user)
+  // while still enabling owner/moderator actions when logged in
+  useEffect(() => {
+    api.me()
+      .then((res) => {
+        setUserId(res.user?.id ?? null);
+        setIsModerator(!!res.user?.is_moderator);
+      })
+      .catch(() => {});
+  }, []);
+
+  const canAct = !!userId && (report.user_id === userId || isModerator);
   const days = daysSince(report.created_at);
-  const statusStyle = STATUS_STYLES[report.status];
+  const statusStyle = STATUS_STYLES[status];
+
+  async function handleStatus(next: Report['status']) {
+    const prev = status;
+    setBusy(true);
+    setActionError(null);
+    setStatus(next); // optimistic
+    try {
+      await api.updateStatus(report.id, next);
+      onStatusChange?.(report.id, next);
+    } catch (err) {
+      setStatus(prev); // rollback
+      setActionError(err instanceof Error ? err.message : 'Could not update — try again.');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div
@@ -59,7 +96,7 @@ export function ReportCard({ report }: { report: Report }) {
               textTransform: 'capitalize',
             }}
           >
-            {report.status}
+            {status}
           </span>
         </div>
 
@@ -72,7 +109,35 @@ export function ReportCard({ report }: { report: Report }) {
           <span>{days === 0 ? 'Today' : `${days}d ago`}</span>
         </div>
 
-        {report.complaint_text == null && report.status === 'pending' && (
+        {report.duplicate_count > 0 && (
+          <div style={{ marginTop: 6, fontSize: 12, color: '#6b7280' }}>
+            Also reported by {report.duplicate_count} other{report.duplicate_count === 1 ? '' : 's'} nearby
+          </div>
+        )}
+
+        {canAct && (
+          <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
+            {status !== 'acknowledged' && (
+              <ActionButton disabled={busy} color="#1e40af" onClick={() => handleStatus('acknowledged')}>
+                Acknowledge
+              </ActionButton>
+            )}
+            {status !== 'resolved' && (
+              <ActionButton disabled={busy} color="#166534" onClick={() => handleStatus('resolved')}>
+                ✓ Resolve
+              </ActionButton>
+            )}
+            {status !== 'rejected' && (
+              <ActionButton disabled={busy} color="#991b1b" onClick={() => handleStatus('rejected')}>
+                Reject
+              </ActionButton>
+            )}
+          </div>
+        )}
+
+        {actionError && <p role="alert" style={{ color: '#dc2626', fontSize: 12, marginTop: 8 }}>{actionError}</p>}
+
+        {report.complaint_text == null && status === 'pending' && (
           <div style={{ marginTop: 6, fontSize: 12, color: '#9ca3af', fontStyle: 'italic' }}>
             ✍️ Drafting complaint letter…
           </div>
@@ -89,5 +154,27 @@ export function ReportCard({ report }: { report: Report }) {
         )}
       </div>
     </div>
+  );
+}
+
+function ActionButton({ children, onClick, disabled, color }: { children: React.ReactNode; onClick: () => void; disabled?: boolean; color: string }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        fontSize: 12,
+        fontWeight: 600,
+        padding: '5px 10px',
+        borderRadius: 8,
+        border: `1px solid ${color}`,
+        color,
+        background: '#fff',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      {children}
+    </button>
   );
 }

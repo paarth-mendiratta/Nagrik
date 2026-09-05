@@ -119,6 +119,10 @@ function makeFrom() {
   };
 }
 
+// Two separate clients mirroring lib/supabase.js: supabaseAdmin (DB ops)
+// and supabaseAuth (sign-in/sign-up). The test asserts they stay separate
+// — see the session-pollution regression test at the bottom.
+const sessionState = { signedInOn: null };
 const supabaseAdmin = {
   from: makeFrom(),
   auth: {
@@ -126,6 +130,19 @@ const supabaseAdmin = {
       TOKENS[token]
         ? { data: { user: TOKENS[token] }, error: null }
         : { data: { user: null }, error: { message: 'invalid token' } },
+    signInWithPassword: async () => { sessionState.signedInOn = 'admin'; return { data: {}, error: null }; },
+  },
+};
+const supabaseAuth = {
+  auth: {
+    signUp: async () => ({ data: { user: { id: 'new-user' }, session: { access_token: 'tok-new' } }, error: null }),
+    signInWithPassword: async () => {
+      sessionState.signedInOn = 'auth';
+      return {
+        data: { user: { id: 'alice', email: 'alice@example.com' }, session: { access_token: 'tok-fresh' } },
+        error: null,
+      };
+    },
   },
 };
 
@@ -139,7 +156,7 @@ function registerStub(relPath, exportsObj) {
   require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports: exportsObj };
 }
 
-registerStub('lib/supabase.js', { supabaseAdmin });
+registerStub('lib/supabase.js', { supabaseAdmin, supabaseAuth });
 registerStub('lib/ai.js', {
   classifyIssuePhoto: async () => ({ category: 'pothole', severity_score: 5, description: 'A pothole filled with water' }),
   generateComplaintText: () => new Promise((resolve) => { letterDeferred = resolve; }),
@@ -148,15 +165,15 @@ registerStub('lib/instagram.js', {
   postReportToInstagram: () =>
     new Promise((resolve) => { igPostCalls++; igDeferreds.push(resolve); }),
 });
-
-// ---------- real modules under test (loaded after stubs) ----------
 const express = require('express');
 const reportsRouter = require('../routes/reports');
+const { router: authRouter } = require('../routes/auth');
 const { findNearbyDuplicate } = require('../lib/duplicates');
 const { runInstagramCheckCycle } = require('../lib/scheduler');
 
 const app = express();
 app.use(express.json());
+app.use('/api/auth', authRouter);
 app.use('/api/reports', reportsRouter);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -360,7 +377,21 @@ const server = app.listen(0, async () => {
     igDeferreds.forEach((r) => r({ id: 'ig-2', simulated: true }));
     await third;
   });
-
+  // ===== Session-pollution regression: login must not touch the admin client =====
+  // Real-world bug: routes/auth.js previously called signInWithPassword on the
+  // shared supabaseAdmin client; the stored user JWT then replaced the
+  // service-role key on every later REST call, so privileged updates
+  // (e.g. PATCH status on someone else's report) silently hit RLS and
+  // updated 0 rows. The fix: a separate supabaseAuth client for auth calls.
+  await test('login uses the auth client, never the admin client', async () => {
+    sessionState.signedInOn = null;
+    const { status } = await call('POST', '/api/auth/login', {
+      body: { email: 'alice@example.com', password: 'pw' },
+    });
+    assert.strictEqual(status, 200, 'login should succeed');
+    assert.strictEqual(sessionState.signedInOn, 'auth',
+      'signInWithPassword must run on supabaseAuth — running on supabaseAdmin re-introduces the 0-rows bug');
+  });
   server.close();
   console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);

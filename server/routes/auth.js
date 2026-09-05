@@ -1,5 +1,5 @@
 const express = require('express');
-const { supabaseAdmin } = require('../lib/supabase');
+const { supabaseAdmin, supabaseAuth } = require('../lib/supabase');
 
 const router = express.Router();
 
@@ -18,7 +18,7 @@ function cookieOptions() {
 
 router.post('/signup', async (req, res) => {
   const { email, password, full_name, phone } = req.body;
-  const { data, error } = await supabaseAdmin.auth.signUp({ email, password });
+  const { data, error } = await supabaseAuth.auth.signUp({ email, password });
   if (error) return res.status(400).json({ error: error.message });
 
   if (data.user) {
@@ -37,7 +37,7 @@ router.post('/signup', async (req, res) => {
 
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
-  const { data, error } = await supabaseAdmin.auth.signInWithPassword({ email, password });
+  const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
   if (error) return res.status(401).json({ error: error.message });
 
   res.cookie(COOKIE_NAME, data.session.access_token, cookieOptions());
@@ -56,7 +56,18 @@ router.get('/me', async (req, res) => {
   const { data, error } = await supabaseAdmin.auth.getUser(token);
   if (error || !data.user) return res.status(401).json({ user: null });
 
-  res.json({ user: data.user });
+  const is_moderator = await getIsModerator(data.user.id);
+  res.json({ user: { ...data.user, is_moderator } });
 });
+
+/** profiles.is_moderator for the given user; false if no profile row. */
+async function getIsModerator(userId) {
+  const { data: profile } = await supabaseAdmin
+    .from('profiles')
+    .select('is_moderator')
+    .eq('id', userId)
+    .maybeSingle();
+  return !!profile?.is_moderator;
+}
 
 module.exports = { router, COOKIE_NAME, cookieOptions };

@@ -57,40 +57,86 @@ const CLASSIFY_ATTEMPTS = 2;
 const CLASSIFY_PROVIDER = process.env.CLASSIFY_PROVIDER || 'latentcode';
 const LATENTCODE_BASE = 'https://latentstack.dev/v1';
 
+// ---- in-process semaphore: cap concurrent AI calls ----
+// A viral submission spike would otherwise fire hundreds of simultaneous
+// requests at the provider, tripping its practical concurrency ceiling and
+// cascading timeouts (with retries doubling the load). Instead: at most
+// MAX_CONCURRENT_CLASSIFY in flight; the rest wait in FIFO order. Waiting
+// counts against the timeout, so a request queued too long still falls
+// through to the "Pending manual review" fallback rather than hanging.
+const MAX_CONCURRENT_CLASSIFY = 10;
+const QUEUE_WARN_DEPTH = 5;
+let inFlight = 0;
+const waiters = []; // FIFO of {resolve}
+
+async function acquireClassifySlot() {
+  if (inFlight < MAX_CONCURRENT_CLASSIFY) {
+    inFlight++;
+    return;
+  }
+  if (waiters.length + 1 > QUEUE_WARN_DEPTH) {
+    console.warn(
+      `[classify:queue] depth ${waiters.length + 1} waiting (>${QUEUE_WARN_DEPTH}) — submission burst in progress`
+    );
+  }
+  await new Promise((resolve) => waiters.push(resolve));
+  inFlight++;
+}
+
+function releaseClassifySlot() {
+  inFlight--;
+  const next = waiters.shift();
+  if (next) next();
+}
+
 async function classifyIssuePhoto(imageUrl) {
   const { base64, mediaType } = await downloadImageAsBase64(imageUrl);
 
+  // The queue wait itself is bounded by the same timeout: if a request
+  // can't acquire a slot in time, it throws (TimeoutError) and the route
+  // falls back to "Pending manual review" instead of queuing indefinitely.
+  await withTimeout(
+    acquireClassifySlot(),
+    CLASSIFY_TIMEOUT_MS,
+    `classification request timed out waiting in queue (depth ${waiters.length})`
+  );
+
   let lastError = null;
-  for (let attempt = 1; attempt <= CLASSIFY_ATTEMPTS; attempt++) {
-    try {
-      const text = await withTimeout(
-        CLASSIFY_PROVIDER === 'latentcode'
-          ? classifyViaLatentcode(base64, mediaType)
-          : classifyViaAgentrouter(base64, mediaType),
-        CLASSIFY_TIMEOUT_MS,
-        `classification attempt ${attempt} timed out after ${CLASSIFY_TIMEOUT_MS / 1000}s`
-      );
+  try {
+    for (let attempt = 1; attempt <= CLASSIFY_ATTEMPTS; attempt++) {
+      try {
+        const text = await withTimeout(
+          CLASSIFY_PROVIDER === 'latentcode'
+            ? classifyViaLatentcode(base64, mediaType)
+            : classifyViaAgentrouter(base64, mediaType),
+          CLASSIFY_TIMEOUT_MS,
+          `classification attempt ${attempt} timed out after ${CLASSIFY_TIMEOUT_MS / 1000}s`
+        );
 
-      const parsed = safeParseJson(text);
+        const parsed = safeParseJson(text);
 
-      return {
-        category: VALID_CATEGORIES.includes(parsed.category) ? parsed.category : 'other',
-        severity_score: clamp(Number(parsed.severity_score) || 0, 0, 10),
-        description: parsed.description || '',
-      };
-    } catch (err) {
-      lastError = err;
-      const isRetryable = err.name === 'TimeoutError' || (typeof err.status === 'number' && err.status >= 400) || err.status >= 400;
-      console.error(
-        `[classify:${CLASSIFY_PROVIDER}] attempt ${attempt}/${CLASSIFY_ATTEMPTS} failed:`,
-        err.name === 'TimeoutError' ? err.message : `${err.status ?? ''} ${err.message ?? err}`
-      );
-      if (attempt < CLASSIFY_ATTEMPTS && isRetryable) continue;
-      throw err;
+        return {
+          category: VALID_CATEGORIES.includes(parsed.category) ? parsed.category : 'other',
+          severity_score: clamp(Number(parsed.severity_score) || 0, 0, 10),
+          description: parsed.description || '',
+        };
+      } catch (err) {
+        lastError = err;
+        const isRetryable = err.name === 'TimeoutError' || (typeof err.status === 'number' && err.status >= 400) || err.status >= 400;
+        console.error(
+          `[classify:${CLASSIFY_PROVIDER}] attempt ${attempt}/${CLASSIFY_ATTEMPTS} failed:`,
+          err.name === 'TimeoutError' ? err.message : `${err.status ?? ''} ${err.message ?? err}`
+        );
+        if (attempt < CLASSIFY_ATTEMPTS && isRetryable) continue;
+        throw err;
+      }
     }
+    throw lastError;
+  } finally {
+    releaseClassifySlot();
   }
-  throw lastError;
 }
+
 
 const CLASSIFY_PROMPT = `Look at this photo of a civic/infrastructure issue. Respond with ONLY a JSON object, no markdown, no preamble:
 {

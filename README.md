@@ -8,14 +8,14 @@ pressure.
 ## How it works
 
 1. User photographs an issue and submits it with location.
-2. **AI (Claude vision)** classifies the category and severity, and drafts a
+2. **AI vision** classifies the category and severity, and drafts a
    one-line description if the user didn't write one.
 3. The backend checks for **nearby duplicate reports** (same category,
    within ~50m, last 30 days) and bumps a shared duplicate counter.
 4. A **priority score** (0-100) is computed from severity + duplicates + age
    + category weight — this drives the priority bar on the feed and the
    default sort order.
-5. **Claude drafts an official complaint letter**, ready to copy into the
+5. **AI drafts an official complaint letter**, ready to copy into the
    relevant government portal.
 6. An hourly **scheduler** checks unresolved reports and posts (or reposts)
    them to an Instagram account with a "N days, 0 action taken" caption —
@@ -26,7 +26,7 @@ pressure.
 
 - **Backend**: Node + Express, Supabase (Postgres + Storage + Auth)
 - **Frontend**: React + Vite + TypeScript
-- **AI**: GLM (`glm-5.3` via agentrouter.org's Anthropic-compatible endpoint, using the `@anthropic-ai/sdk`) for photo classification + complaint drafting
+- **AI**: `gpt-5.6-sol` (photo classification, vision-verified) + `glm-5.3` (complaint letters), both via agentrouter.org's Anthropic-compatible endpoint using the `@anthropic-ai/sdk`
 - **Instagram**: Meta Graph API (with a simulate mode for demo/dev)
 
 Auth follows the same httpOnly-cookie pattern as the No Cap project — token

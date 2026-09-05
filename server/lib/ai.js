@@ -27,20 +27,21 @@ const VALID_CATEGORIES = [
  * Classifies an uploaded civic-issue photo: category + severity (0-10) + a
  * one-line description. Expects a public/signed image URL (Supabase Storage).
  *
- * Vision model: claude-opus-4-8 (real image understanding — glm-5.3 via
- * agentrouter turned out not to receive image content; it hallucinated
- * answers from prompt framing). The complaint letter stays on glm-5.3 —
- * text-only, cheaper, verified working.
+ * Vision model: gpt-5.6-sol via agentrouter — passed the full 4-check
+ * vision suite (solid-color control, real pothole accuracy, negative
+ * control, 3x consistency) on 2026-09-05. History: glm-5.3 hallucinated
+ * images from prompt text; deepseek-v4-flash honestly reported "no image
+ * content visible" (no vision); claude-opus models are currently blocked
+ * by an agentrouter budget-pool 402 — revisit when unblocked. The
+ * complaint letter stays on glm-5.3 — text-only, cheaper, verified working.
  *
- * The image is downloaded server-side and sent as base64: agentrouter
- * rejects URL image sources for claude-opus-4-8 with "URL content sources
- * are not yet supported for this model".
+ * The image is downloaded server-side and sent as base64.
  */
 async function classifyIssuePhoto(imageUrl) {
   const { base64, mediaType } = await downloadImageAsBase64(imageUrl);
 
   const msg = await anthropic.messages.create({
-    model: 'claude-opus-4-8',
+    model: 'gpt-5.6-sol',
     max_tokens: 5000,
     messages: [
       {

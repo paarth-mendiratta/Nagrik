@@ -80,12 +80,23 @@ router.post("/", requireAuth, perUserRateLimit({ max: 10 }), async (req, res) =>
       });
     }
 
-    // 1. AI classification
-    const {
-      category,
-      severity_score,
-      description: aiDescription,
-    } = await classifyIssuePhoto(photo_url);
+    // 1. AI classification — non-blocking on failure: if both attempts
+    // fail (timeout/4xx/5xx), save the report unclassified for manual
+    // review rather than rejecting the user's submission.
+    let category = "other";
+    let severity_score = 0;
+    let aiDescription = "";
+    try {
+      ({ category, severity_score, description: aiDescription } =
+        await classifyIssuePhoto(photo_url));
+    } catch (classifyErr) {
+      console.error(
+        "[POST /reports] classification failed, saving unclassified:",
+        classifyErr.status ?? "",
+        classifyErr.message ?? String(classifyErr)
+      );
+      aiDescription = "Pending manual review";
+    }
     const description = userDescription || aiDescription;
 
     // 2. Duplicate detection
@@ -179,8 +190,14 @@ router.post("/", requireAuth, perUserRateLimit({ max: 10 }), async (req, res) =>
         );
       });
   } catch (err) {
-    console.error("POST /reports failed:", err);
-    res.status(500).json({ error: err.message });
+    // err.message verbatim + status code if the SDK attached one; the
+    // stringified object alone is undiagnosable.
+    console.error(
+      `POST /reports failed: ${err.status ?? ""} ${err.message ?? String(err)}`
+    );
+    res
+      .status(500)
+      .json({ error: err.message ?? "internal server error" });
   }
 });
 

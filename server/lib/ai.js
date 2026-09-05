@@ -34,42 +34,83 @@ const VALID_CATEGORIES = [
  * content visible" (no vision); claude-opus models are currently blocked
  * by an agentrouter budget-pool 402 — revisit when unblocked. The
  * complaint letter stays on glm-5.3 — text-only, cheaper, verified working.
- *
  * The image is downloaded server-side and sent as base64.
+ *
+ * Latency hardening (2026-09-05): agentrouter routes some requests to
+ * slow/flaky nodes — observed 20-48s calls and intermittent upstream 4xx
+ * where isolated calls run 5-9s. Each attempt gets a 25s timeout with one
+ * retry on timeout or upstream 4xx/5xx; if both fail the caller saves the
+ * report unclassified (see the fallback in routes/reports.js) instead of
+ * blocking the user.
  */
+const CLASSIFY_TIMEOUT_MS = 25_000;
+const CLASSIFY_ATTEMPTS = 2;
+
 async function classifyIssuePhoto(imageUrl) {
   const { base64, mediaType } = await downloadImageAsBase64(imageUrl);
 
-  const msg = await anthropic.messages.create({
-    model: 'gpt-5.6-sol',
-    max_tokens: 5000,
-    messages: [
-      {
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-          {
-            type: 'text',
-            text: `Look at this photo of a civic/infrastructure issue. Respond with ONLY a JSON object, no markdown, no preamble:
+  let lastError = null;
+  for (let attempt = 1; attempt <= CLASSIFY_ATTEMPTS; attempt++) {
+    try {
+      const msg = await withTimeout(
+        anthropic.messages.create({
+          model: 'gpt-5.6-sol',
+          max_tokens: 5000,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+                {
+                  type: 'text',
+                  text: `Look at this photo of a civic/infrastructure issue. Respond with ONLY a JSON object, no markdown, no preamble:
 {
   "category": one of ${JSON.stringify(VALID_CATEGORIES)},
   "severity_score": number 0-10 (10 = severe safety hazard, 0 = cosmetic),
   "description": "one short factual sentence describing what's visible"
 }`,
-          },
-        ],
-      },
-    ],
+                },
+              ],
+            },
+          ],
+        }),
+        CLASSIFY_TIMEOUT_MS,
+        `classification attempt ${attempt} timed out after ${CLASSIFY_TIMEOUT_MS / 1000}s`
+      );
+
+      const text = extractText(msg);
+      const parsed = safeParseJson(text);
+
+      return {
+        category: VALID_CATEGORIES.includes(parsed.category) ? parsed.category : 'other',
+        severity_score: clamp(Number(parsed.severity_score) || 0, 0, 10),
+        description: parsed.description || '',
+      };
+    } catch (err) {
+      lastError = err;
+      const isRetryable = err.name === 'TimeoutError' || (typeof err.status === 'number' && err.status >= 400);
+      console.error(
+        `[classify] attempt ${attempt}/${CLASSIFY_ATTEMPTS} failed:`,
+        err.name === 'TimeoutError' ? err.message : `${err.status ?? ''} ${err.message ?? err}`
+      );
+      if (attempt < CLASSIFY_ATTEMPTS && isRetryable) continue;
+      throw err;
+    }
+  }
+  throw lastError;
+}
+
+/** Rejects with a TimeoutError if the promise doesn't settle in `ms`. */
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const e = new Error(message);
+      e.name = 'TimeoutError';
+      reject(e);
+    }, ms);
   });
-
-  const text = extractText(msg);
-  const parsed = safeParseJson(text);
-
-  return {
-    category: VALID_CATEGORIES.includes(parsed.category) ? parsed.category : 'other',
-    severity_score: clamp(Number(parsed.severity_score) || 0, 0, 10),
-    description: parsed.description || '',
-  };
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 /**

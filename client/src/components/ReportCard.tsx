@@ -103,6 +103,12 @@ export function ReportCard({ report, onStatusChange }: { report: Report; onStatu
 
         <p style={{ fontSize: 14, color: '#374151', marginBottom: 10 }}>{report.description}</p>
 
+        {report.category === 'other' && report.description === 'Pending manual review' && (
+          <div style={{ fontSize: 12, color: '#b45309', marginBottom: 10, fontStyle: 'italic' }}>
+            ⏳ AI classification pending — you can edit this manually
+          </div>
+        )}
+
         <PriorityBar score={report.priority_score} />
 
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 10, fontSize: 12, color: '#6b7280' }}>

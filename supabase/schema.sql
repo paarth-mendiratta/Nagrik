@@ -110,17 +110,20 @@ alter table report_comments enable row level security;
 -- Public read: only non-hidden comments are visible to anonymous readers.
 -- (The API goes through the service-role client and applies its own
 -- is_hidden filter + moderation checks on top.)
+drop policy if exists "Public read non-hidden comments" on report_comments;
 create policy "Public read non-hidden comments"
   on report_comments for select
   using (is_hidden = false);
 
 -- Authenticated users can comment.
+drop policy if exists "Authenticated users can insert comments" on report_comments;
 create policy "Authenticated users can insert comments"
   on report_comments for insert
   with check (auth.uid() = user_id);
 
 -- Comment owner or a moderator can update (soft-delete/hide).
 -- profiles.is_moderator is the source of truth for moderator status.
+drop policy if exists "Owner or moderator can update comments" on report_comments;
 create policy "Owner or moderator can update comments"
   on report_comments for update
   using (

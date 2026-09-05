@@ -1,6 +1,10 @@
 -- Migration: report_comments table (for databases created before comments existed).
--- Paste into the Supabase SQL editor and run once. Identical to the section
--- already present in supabase/schema.sql for fresh installs.
+-- Paste into the Supabase SQL editor and run as ONE block. Fully idempotent:
+-- table/index use IF NOT EXISTS and each policy is dropped before creation,
+-- so re-running is safe.
+--
+-- NOTE: run the ENTIRE block in one pass. If only part of it executes you'll
+-- hit "relation report_comments does not exist" on the index/policy lines.
 
 create table if not exists report_comments (
   id uuid primary key default uuid_generate_v4(),
@@ -15,14 +19,17 @@ create index if not exists idx_comments_report on report_comments (report_id, cr
 
 alter table report_comments enable row level security;
 
+drop policy if exists "Public read non-hidden comments" on report_comments;
 create policy "Public read non-hidden comments"
   on report_comments for select
   using (is_hidden = false);
 
+drop policy if exists "Authenticated users can insert comments" on report_comments;
 create policy "Authenticated users can insert comments"
   on report_comments for insert
   with check (auth.uid() = user_id);
 
+drop policy if exists "Owner or moderator can update comments" on report_comments;
 create policy "Owner or moderator can update comments"
   on report_comments for update
   using (

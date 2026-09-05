@@ -33,6 +33,14 @@ export const api = {
     request(`/reports/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
   stats: () => request('/reports/stats/summary'),
 
+  // comments
+  listComments: (reportId: string) =>
+    request(`/reports/${reportId}/comments`),
+  addComment: (reportId: string, body: string) =>
+    request(`/reports/${reportId}/comments`, { method: 'POST', body: JSON.stringify({ body }) }),
+  hideComment: (reportId: string, commentId: string) =>
+    request(`/reports/${reportId}/comments/${commentId}`, { method: 'DELETE' }),
+
   // mla
   nearestMla: (lat: number, lng: number) =>
     request(`/mla/nearest?lat=${lat}&lng=${lng}`),

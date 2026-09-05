@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { PriorityBar } from './PriorityBar';
 import { api } from '../lib/api';
+import { CommentThread } from './CommentThread';
 
 export interface Report {
   id: string;
@@ -152,6 +153,8 @@ export function ReportCard({ report, onStatusChange }: { report: Report; onStatu
             </p>
           </details>
         )}
+
+        <CommentThread reportId={report.id} />
       </div>
     </div>
   );

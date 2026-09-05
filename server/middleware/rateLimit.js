@@ -16,26 +16,29 @@ const DEFAULT_MAX = 10;
 function perUserRateLimit({
   windowMs = DEFAULT_WINDOW_MS,
   max = DEFAULT_MAX,
+  keyFn = (req) => req.user?.id, // scope key — override to include e.g. report id
+  message = `Rate limit reached — max ${DEFAULT_MAX} requests per hour.`,
 } = {}) {
-  const hits = new Map(); // userId -> array of timestamps
+  const hits = new Map(); // key -> array of timestamps
 
   // Periodically drop stale entries so the map doesn't grow forever.
   const sweep = setInterval(() => {
     const cutoff = Date.now() - windowMs;
-    for (const [userId, stamps] of hits) {
+    for (const [key, stamps] of hits) {
       const fresh = stamps.filter((t) => t > cutoff);
-      if (fresh.length === 0) hits.delete(userId);
-      else hits.set(userId, fresh);
+      if (fresh.length === 0) hits.delete(key);
+      else hits.set(key, fresh);
     }
   }, windowMs);
   if (sweep.unref) sweep.unref();
 
   return function rateLimited(req, res, next) {
-    if (!req.user?.id) return next(); // only limits authenticated users
+    const key = req.user?.id ? keyFn(req) : null;
+    if (!key) return next(); // only limits authenticated users
 
     const now = Date.now();
     const cutoff = now - windowMs;
-    const stamps = (hits.get(req.user.id) ?? []).filter((t) => t > cutoff);
+    const stamps = (hits.get(key) ?? []).filter((t) => t > cutoff);
 
     if (stamps.length >= max) {
       const retryInMinutes = Math.ceil((stamps[0] + windowMs - now) / 60000);
@@ -43,12 +46,12 @@ function perUserRateLimit({
       return res
         .status(429)
         .json({
-          error: `Rate limit reached — max ${max} reports per hour. Try again in ~${retryInMinutes} minute(s).`,
+          error: `${message} Try again in ~${retryInMinutes} minute(s).`,
         });
     }
 
     stamps.push(now);
-    hits.set(req.user.id, stamps);
+    hits.set(key, stamps);
     next();
   };
 }

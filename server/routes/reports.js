@@ -5,8 +5,13 @@ const { findNearbyDuplicate } = require("../lib/duplicates");
 const { classifyIssuePhoto, generateComplaintText } = require("../lib/ai");
 const { requireAuth } = require("../middleware/auth");
 const { perUserRateLimit } = require("../middleware/rateLimit");
+const commentsRouter = require("./comments");
 
 const router = express.Router();
+
+// /api/reports/:id/comments — comment thread per report
+router.use("/:id/comments", commentsRouter);
+
 
 /**
  * GET /api/reports

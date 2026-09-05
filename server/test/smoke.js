@@ -13,12 +13,12 @@ const db = {
   reports: [],
   profiles: [],
   report_duplicates: [],
+  report_comments: [],
 };
-
 const TOKENS = {
-  'tok-alice': { id: 'alice' },
-  'tok-bob': { id: 'bob' },
-  'tok-mod': { id: 'mod' },
+  'tok-alice': { id: 'alice', email: 'alice@example.com' },
+  'tok-bob': { id: 'bob', email: 'bob@example.com' },
+  'tok-mod': { id: 'mod', email: 'mod@example.com' },
 };
 
 function applyFilters(rows, filters) {
@@ -34,6 +34,8 @@ function applyFilters(rows, filters) {
           return rv >= val;
         case 'lte':
           return rv <= val;
+        case 'in':
+          return Array.isArray(val) && val.includes(rv);
         case 'ilike':
           return String(rv ?? '')
             .toLowerCase()
@@ -74,6 +76,8 @@ function makeFrom() {
       not(c, op, v) { state.filters.push([c, op, v]); return q; },
       order(c, opts) { state.orderCol = c; state.orderAsc = !(opts && opts.ascending === false); return q; },
       limit(n) { state.limitN = n; return q; },
+      range(from, to) { state.rangeFrom = from; state.rangeTo = to; return q; },
+      in(c, vals) { state.filters.push([c, 'in', vals]); return q; },
       single() { state.single = true; return exec(); },
       maybeSingle() { state.maybe = true; return exec(); },
       then(onRes, onRej) { return exec().then(onRes, onRej); },
@@ -89,7 +93,7 @@ function makeFrom() {
     function exec() {
       const rows = db[table];
       if (state.cmd === 'insert') {
-        const row = { ...(table === 'reports' ? { status: 'pending' } : {}), id: `${table}-${rows.length + 1}`, ...state.payload };
+        const row = { ...(table === 'reports' ? { status: 'pending' } : {}), ...(table === 'report_comments' ? { is_hidden: false, created_at: new Date(Date.now() + rows.length).toISOString() } : {}), id: `${table}-${rows.length + 1}`, ...state.payload };
         rows.push(row);
         return Promise.resolve({ data: project(row), error: null });
       }
@@ -104,6 +108,7 @@ function makeFrom() {
         });
       }
       if (state.limitN != null) matched = matched.slice(0, state.limitN);
+      if (state.rangeFrom != null) matched = matched.slice(state.rangeFrom, (state.rangeTo ?? matched.length - 1) + 1);
       if (state.single) {
         return matched.length
           ? Promise.resolve({ data: project(matched[0]), error: null })
@@ -391,6 +396,104 @@ const server = app.listen(0, async () => {
     assert.strictEqual(status, 200, 'login should succeed');
     assert.strictEqual(sessionState.signedInOn, 'auth',
       'signInWithPassword must run on supabaseAuth — running on supabaseAdmin re-introduces the 0-rows bug');
+  });
+
+  // ===== Comments: post, fetch, rate limit, moderation, blocklist, XSS =====
+  db.reports.push({
+    id: 'comment-target', category: 'pothole', status: 'pending', user_id: 'alice',
+    photo_url: 'x.jpg', lat: 1, lng: 1, priority_score: 50, duplicate_count: 0,
+    created_at: new Date().toISOString(),
+  });
+
+  await test('POST comment: 201, stores escaped body', async () => {
+    const { status, body } = await call('POST', '/api/reports/comment-target/comments', {
+      token: 'tok-alice',
+      body: { body: 'This pothole damaged my scooter yesterday' },
+    });
+    assert.strictEqual(status, 201, `expected 201: ${JSON.stringify(body)}`);
+    assert.ok(body.comment.id, 'comment id returned');
+    assert.strictEqual(body.comment.author_name, 'alice', 'author name from email prefix');
+  });
+
+  await test('GET comments: returns them oldest first', async () => {
+    await call('POST', '/api/reports/comment-target/comments', {
+      token: 'tok-bob',
+      body: { body: 'Same here, please fix urgently' },
+    });
+    const { status, body } = await call('GET', '/api/reports/comment-target/comments');
+    assert.strictEqual(status, 200);
+    assert.strictEqual(body.comments.length, 2);
+    assert.ok(body.comments[0].created_at <= body.comments[1].created_at, 'oldest first');
+  });
+
+  await test('comment rate limit: 6th comment on same report in an hour gets 429', async () => {
+    // alice has 1, bob has 1 from above; alice needs 4 more to hit 5, then 429 on 6th
+    for (let i = 0; i < 4; i++) {
+      const { status } = await call('POST', '/api/reports/comment-target/comments', {
+        token: 'tok-alice',
+        body: { body: 'comment number ' + i },
+      });
+      assert.strictEqual(status, 201, `alice comment ${i + 2} should be 201`);
+    }
+    const limited = await call('POST', '/api/reports/comment-target/comments', {
+      token: 'tok-alice',
+      body: { body: 'one comment too many' },
+    });
+    assert.strictEqual(limited.status, 429, `6th comment should be 429, got ${limited.status}`);
+    assert.ok(limited.body.error.includes('5 comments'), `message should mention the cap: ${limited.body.error}`);
+  });
+
+  await test('comment rate limit is per-report: another report accepts comments', async () => {
+    db.reports.push({
+      id: 'comment-target-2', category: 'garbage', status: 'pending', user_id: 'bob',
+      photo_url: 'x.jpg', lat: 2, lng: 2, priority_score: 30, duplicate_count: 0,
+      created_at: new Date().toISOString(),
+    });
+    const { status } = await call('POST', '/api/reports/comment-target-2/comments', {
+      token: 'tok-alice',
+      body: { body: 'different report, fresh limit' },
+    });
+    assert.strictEqual(status, 201, 'per-user-per-report scoping must allow this');
+  });
+
+  await test('hide comment: non-owner non-moderator gets 403', async () => {
+    const { status, body } = await call('DELETE', '/api/reports/comment-target/comments/report_comments-2', {
+      token: 'tok-alice',
+    });
+    assert.strictEqual(status, 403, `expected 403: ${JSON.stringify(body)}`);
+    assert.strictEqual(db.report_comments.find((c) => c.id === 'report_comments-2').is_hidden, false, 'must not be hidden');
+  });
+
+  await test('hide comment: moderator can hide, hidden comments vanish from GET', async () => {
+    db.profiles.push({ id: 'mod', is_moderator: true });
+    const { status } = await call('DELETE', '/api/reports/comment-target/comments/report_comments-2', {
+      token: 'tok-mod',
+    });
+    assert.strictEqual(status, 200, 'moderator should be able to hide');
+    assert.strictEqual(db.report_comments.find((c) => c.id === 'report_comments-2').is_hidden, true, 'soft delete sets is_hidden');
+
+    const { body } = await call('GET', '/api/reports/comment-target/comments');
+    assert.ok(!body.comments.some((c) => c.id === 'report_comments-2'), 'hidden comment must not be served');
+    db.profiles = [];
+  });
+
+  await test('blocked word comment is rejected with 400', async () => {
+    const { status, body } = await call('POST', '/api/reports/comment-target/comments', {
+      token: 'tok-bob',
+      body: { body: 'this is shit reporting' },
+    });
+    assert.strictEqual(status, 400, `blocklist should reject: ${JSON.stringify(body)}`);
+    assert.ok(body.error.toLowerCase().includes('moderation') || body.error.toLowerCase().includes('blocked'));
+  });
+
+  await test('XSS payload is escaped, not stored raw', async () => {
+    const { status, body } = await call('POST', '/api/reports/comment-target/comments', {
+      token: 'tok-bob',
+      body: { body: '<script>alert("xss")</script> nice road' },
+    });
+    assert.strictEqual(status, 201, 'XSS-payload comment itself is valid content');
+    assert.ok(!body.comment.body.includes('<script>'), 'stored body must not contain raw <script>');
+    assert.ok(body.comment.body.includes('&lt;script&gt;'), 'stored body must be escaped');
   });
   server.close();
   console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} TEST(S) FAILED`);

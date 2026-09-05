@@ -20,7 +20,23 @@ if (process.env.NODE_ENV === 'production' && !process.env.SUPABASE_SERVICE_ROLE_
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const CLIENT_URL = process.env.CLIENT_URL; // comma-separated list supported
+
+// Parse CLIENT_URL into a normalized origin allowlist: comma-separated,
+// trimmed, lowercased, trailing slashes stripped. Browsers never send a
+// trailing slash in the Origin header, so "https://app.vercel.app/" would
+// never match and CORS would silently block everything — normalization
+// makes that common paste-error harmless.
+const allowedOrigins = (process.env.CLIENT_URL || '')
+  .split(',')
+  .map((s) => s.trim().toLowerCase().replace(/\/+$/, ''))
+  .filter(Boolean);
+
+console.log(
+  `[cors] CLIENT_URL parsed as ${allowedOrigins.length} origin(s):` +
+    (allowedOrigins.length
+      ? allowedOrigins.map((o) => `\n  - ${o}`).join('')
+      : ' (none — permissive dev mode, dev only)')
+);
 
 // CORS — LOAD-BEARING FOR CSRF DEFENSE, not just functionality.
 // Cookies are httpOnly + SameSite=None in prod (required for cross-site),
@@ -31,7 +47,7 @@ const CLIENT_URL = process.env.CLIENT_URL; // comma-separated list supported
 // cookies keep flowing — there is no separate CSRF token as backstop yet.
 app.use(
   cors({
-    origin: CLIENT_URL ? CLIENT_URL.split(',').map((s) => s.trim()) : true,
+    origin: allowedOrigins.length ? allowedOrigins : true,
     credentials: true,
   })
 );

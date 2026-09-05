@@ -1,0 +1,39 @@
+# Render Blueprint for the Nagrik API server.
+#
+# Deploys from the repo root with the client/ directory ignored (Render
+# builds the server/ workspace via the rootDir field). All env vars below
+# must be filled in the Render dashboard (or via a synced envVarGroup).
+services:
+  - type: web
+    name: nagrik-api
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # Required — the server refuses to boot in production without these.
+      - key: NODE_ENV
+        value: production
+      - key: CLIENT_URL
+        sync: false # set to your deployed Vercel URL, e.g. https://nagrik.vercel.app
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false # secret — paste in the dashboard
+      - key: AGENTROUTER_API_KEY
+        sync: false # secret
+      # Optional (have sane defaults)
+      - key: PORT
+        value: 8080 # Render injects PORT; set here only as documentation
+      - key: IG_SIMULATE
+        value: "true" # keep true until Meta app review is approved
+      - key: IG_BUSINESS_ACCOUNT_ID
+        sync: false
+      - key: IG_ACCESS_TOKEN
+        sync: false
+      - key: IG_REPOST_AFTER_DAYS
+        value: "3"
+      - key: IG_ESCALATION_DAYS
+        value: "7"

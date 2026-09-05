@@ -1,0 +1,12 @@
+[
+  {
+    "name": "TODO: full MLA name",
+    "party": "TODO: party name",
+    "constituency": "TODO: constituency name (must be unique across entries)",
+    "ward": "TODO: ward / block name",
+    "contact_email": "TODO: official email or remove if unknown",
+    "contact_phone": "TODO: office phone or remove if unknown",
+    "center_lat": 0.0,
+    "center_lng": 0.0
+  }
+]

@@ -31,6 +31,14 @@ const allowedOrigins = (process.env.CLIENT_URL || '')
   .map((s) => s.trim().toLowerCase().replace(/\/+$/, ''))
   .filter(Boolean);
 
+// Fail-closed: a set-but-empty CLIENT_URL (e.g. only spaces) must not fall
+// through to permissive CORS in production.
+if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
+  throw new Error(
+    'CLIENT_URL is set but contains no valid origins - refusing to boot with permissive CORS.'
+  );
+}
+
 console.log(
   `[cors] CLIENT_URL parsed as ${allowedOrigins.length} origin(s):` +
     (allowedOrigins.length

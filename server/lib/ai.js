@@ -26,16 +26,15 @@ const VALID_CATEGORIES = [
 /**
  * Classifies an uploaded civic-issue photo: category + severity (0-10) + a
  * one-line description. Expects a public/signed image URL (Supabase Storage).
- *
  * PROVIDERS (CLASSIFY_PROVIDER env var, default 'latentcode'):
- *   - latentcode (PRIMARY): gemini-3.6-flash via latentstack.dev's
+ *   - latentcode (PRIMARY): gemini-3.7-flash via latentstack.dev's
  *     OpenAI-compatible /v1/chat/completions — passed the full 4-check
  *     vision suite (solid-color control, real pothole accuracy, negative
- *     control, 3x consistency) on 2026-09-05, ~40% faster than
- *     gemini-3.1-pro with identical accuracy (test/vision-check-latentcode.js).
- *     Account has unlimited hackathon-credit rate limits. gemini-3.1-pro
- *     also passed and is a one-line upgrade if accuracy ever matters more
- *     than latency.
+ *     control, 3x consistency, all severity-8) on 2026-09-06
+ *     (test/vision-check-latentcode.js). NOTE: the account has a ~$20/day
+ *     spend cap SEPARATE from the unlimited rate limit — on 402
+ *     budget_exceeded, switch CLASSIFY_PROVIDER=agentrouter. gemini-3.6-flash
+ *     is the previous known-good; 3.1-pro passed too (higher latency).
  *   - agentrouter (FALLBACK): gpt-5.6-sol via the Anthropic SDK — also
  *     passed the 4-check suite, but agentrouter budget pools exhaust
  *     quickly (402s). Switch CLASSIFY_PROVIDER=agentrouter if latentstack
@@ -172,7 +171,7 @@ async function classifyViaLatentcode(base64, mediaType) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.7-flash',
       max_tokens: 5000,
       messages: [
         {

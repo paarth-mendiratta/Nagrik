@@ -26,7 +26,7 @@ pressure.
 
 - **Backend**: Node + Express, Supabase (Postgres + Storage + Auth)
 - **Frontend**: React + Vite + TypeScript
-- **AI**: `gemini-3.6-flash` via LatentCode/latentstack.dev (photo classification, vision-verified, primary) with `gpt-5.6-sol` via agentrouter.org as fallback; complaint letters via `glm-5.3` on agentrouter. Both providers behind the `@anthropic-ai/sdk`/OpenAI-compatible endpoints
+- **AI**: `gemini-3.7-flash` via LatentCode/latentstack.dev (photo classification, vision-verified, primary) with `gpt-5.6-sol` via agentrouter.org as fallback; complaint letters via `glm-5.3` on agentrouter. Both providers behind the `@anthropic-ai/sdk`/OpenAI-compatible endpoints
 - **Instagram**: Meta Graph API (with a simulate mode for demo/dev)
 
 Auth follows the same httpOnly-cookie pattern as the No Cap project — token

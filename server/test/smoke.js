@@ -19,6 +19,7 @@ const TOKENS = {
   'tok-alice': { id: 'alice', email: 'alice@example.com' },
   'tok-bob': { id: 'bob', email: 'bob@example.com' },
   'tok-mod': { id: 'mod', email: 'mod@example.com' },
+  'tok-carol': { id: 'carol', email: 'carol@example.com' },
 };
 
 function applyFilters(rows, filters) {
@@ -162,9 +163,14 @@ function registerStub(relPath, exportsObj) {
 }
 
 registerStub('lib/supabase.js', { supabaseAdmin, supabaseAuth });
+// Load the REAL ai module first so the SSRF precheck implementation is
+// genuine, then stub only the model-call functions. The blocklist logic
+// (assertPublicHost) stays real so these tests actually exercise it.
+const realAi = require('../lib/ai');
 registerStub('lib/ai.js', {
   classifyIssuePhoto: async () => ({ category: 'pothole', severity_score: 5, description: 'A pothole filled with water' }),
   generateComplaintText: () => new Promise((resolve) => { letterDeferred = resolve; }),
+  assertPublicHost: realAi.assertPublicHost,
 });
 registerStub('lib/instagram.js', {
   postReportToInstagram: () =>
@@ -494,6 +500,58 @@ const server = app.listen(0, async () => {
     assert.strictEqual(status, 201, 'XSS-payload comment itself is valid content');
     assert.ok(!body.comment.body.includes('<script>'), 'stored body must not contain raw <script>');
     assert.ok(body.comment.body.includes('&lt;script&gt;'), 'stored body must be escaped');
+  });
+
+  // ===== Security fixes: SSRF blocklist + lat/lng validation =====
+  await test('SSRF: private/internal photo_url hosts rejected with 400', async () => {
+    const blocked = [
+      'https://169.254.169.254/latest/meta-data/.jpg', // cloud metadata
+      'https://192.168.1.1/admin.jpg', // RFC1918
+      'https://127.0.0.1/x.jpg', // loopback literal
+      'https://[::1]/x.jpg', // IPv6 loopback
+    ];
+    for (const url of blocked) {
+      const { status, body } = await call('POST', '/api/reports', {
+        token: 'tok-mod',
+        body: { photo_url: url, lat: 26.1, lng: 76.1 },
+      });
+      assert.strictEqual(status, 400, `expected 400 for ${url}: ${JSON.stringify(body)}`);
+      assert.ok(
+        /private\/internal/.test(body.error),
+        `error should explain the block: ${body.error}`
+      );
+    }
+    // public host passes the SSRF check (stubbed classify handles the rest)
+    const { status } = await call('POST', '/api/reports', {
+      token: 'tok-mod',
+      body: { photo_url: 'https://public-example.com/ok.jpg', lat: 26.1, lng: 76.1 },
+    });
+    assert.strictEqual(status, 201, 'public photo_url must not be blocked');
+  });
+
+  await test('lat/lng: out-of-range values rejected with clean 400', async () => {
+    for (const [lat, lng] of [[95, 0], [-91, 0], [0, 181], [0, -181], [1e308, 1e308]]) {
+      const { status, body } = await call('POST', '/api/reports', {
+        token: 'tok-bob',
+        body: { photo_url: 'https://example.com/r.jpg', lat, lng },
+      });
+      assert.strictEqual(status, 400, `expected 400 for lat=${lat} lng=${lng}`);
+      assert.ok(!/double precision|postgres/i.test(JSON.stringify(body)), 'must not leak DB error text');
+    }
+  });
+
+  await test('lat/lng: non-numeric values rejected with 400, never a 500', async () => {
+    for (const [lat, lng] of [['DROP TABLE reports', 1], [1, "'; --"], ['26.1', 76.1], [null, 1]]) {
+      const { status, body } = await call('POST', '/api/reports', {
+        token: 'tok-carol',
+        body: { photo_url: 'https://example.com/n.jpg', lat, lng },
+      });
+      assert.strictEqual(status, 400, `expected 400 (not 500) for lat=${JSON.stringify(lat)}`);
+      assert.ok(
+        !/double precision|invalid input syntax|postgres/i.test(JSON.stringify(body)),
+        `must not leak raw Postgres error: ${JSON.stringify(body)}`
+      );
+    }
   });
   server.close();
   console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} TEST(S) FAILED`);

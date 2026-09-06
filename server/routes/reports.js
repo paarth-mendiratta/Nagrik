@@ -2,7 +2,7 @@ const express = require("express");
 const { supabaseAdmin } = require("../lib/supabase");
 const { computePriority } = require("../lib/priority");
 const { findNearbyDuplicate } = require("../lib/duplicates");
-const { classifyIssuePhoto, generateComplaintText } = require("../lib/ai");
+const { classifyIssuePhoto, generateComplaintText, assertPublicHost } = require("../lib/ai");
 const { requireAuth } = require("../middleware/auth");
 const { perUserRateLimit } = require("../middleware/rateLimit");
 const commentsRouter = require("./comments");
@@ -70,6 +70,16 @@ router.post("/", requireAuth, perUserRateLimit({ max: 10 }), async (req, res) =>
         .json({ error: "photo_url, lat, and lng are required" });
     }
 
+    // Coordinates must be finite numbers in geographic range — reject
+    // strings/NaN/Infinity/out-of-range with a clean 400 BEFORE any DB
+    // write, so malformed values never surface a raw Postgres error.
+    if (!isValidLatLng(lat, lng)) {
+      return res.status(400).json({
+        error:
+          "lat must be a number in [-90, 90] and lng a number in [-180, 180]",
+      });
+    }
+
     // Photo must be an https URL pointing at an image file type we accept —
     // catches non-image payloads early (before the Claude vision call) and
     // forbids non-https or obviously bogus URLs.
@@ -80,6 +90,18 @@ router.post("/", requireAuth, perUserRateLimit({ max: 10 }), async (req, res) =>
       });
     }
 
+    // SSRF guard at the route level: reject private/internal photo hosts
+    // with a clean 400 BEFORE any processing (the classify path re-checks,
+    // but this way the attacker doesn't even get a fallback-saved report).
+    try {
+      await assertPublicHost(photo_url);
+    } catch (ssrfErr) {
+      if (ssrfErr.name === "SsrfBlockedError") {
+        return res.status(400).json({ error: ssrfErr.message });
+      }
+      // DNS resolution failure of a *public-looking* hostname is not a
+      // security issue — let it flow to classify, which handles it.
+    }
     // 1. AI classification — non-blocking on failure: if both attempts
     // fail (timeout/4xx/5xx), save the report unclassified for manual
     // review rather than rejecting the user's submission.
@@ -269,6 +291,20 @@ const PHOTO_URL_PATTERN =
 /** Basic server-side photo_url sanity check (type + https). */
 function isValidPhotoUrl(url) {
   return typeof url === "string" && PHOTO_URL_PATTERN.test(url);
+}
+
+/** Finite numbers in geographic range; rejects strings, NaN, Infinity. */
+function isValidLatLng(lat, lng) {
+  return (
+    typeof lat === "number" &&
+    typeof lng === "number" &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lng >= -180 &&
+    lng <= 180
+  );
 }
 
 module.exports = router;

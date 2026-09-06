@@ -254,8 +254,83 @@ function extractText(msg) {
  * Downloads the photo server-side and returns it as base64 + media type
  * for inline image input. claude-opus-4-8 via agentrouter doesn't accept
  * URL image sources, so every classification goes through this.
+ *
+ * SSRF guard: the URL's hostname is DNS-resolved first and rejected if it
+ * lands in a private/internal range (loopback, link-local incl. cloud
+ * metadata at 169.254.169.254, RFC1918 space, IPv6 equivalents) — otherwise
+ * an attacker's photo_url would make the server fetch internal services.
+ * Literal-IP hostnames are checked directly; names are resolved via
+ * dns.lookup (which follows the OS resolver, including /etc/hosts entries
+ * like "localhost").
  */
+const dns = require('dns');
+const net = require('net');
+
+function isPrivateIp(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    return (
+      a === 10 || // 10.0.0.0/8
+      (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+      (a === 192 && b === 168) || // 192.168.0.0/16
+      a === 127 || // 127.0.0.0/8 loopback
+      (a === 169 && b === 254) || // 169.254.0.0/16 link-local + cloud metadata
+      a === 0 || // 0.0.0.0/8 "this host"
+      (a === 100 && b >= 64 && b <= 127) // 100.64.0.0/10 carrier NAT
+    );
+  }
+  if (net.isIPv6(ip)) {
+    const v6 = ip.toLowerCase();
+    if (v6 === '::1' || v6 === '::') return true; // loopback / unspecified
+    if (v6.startsWith('fc') || v6.startsWith('fd')) return true; // fc00::/7 ULA
+    if (v6.startsWith('fe80')) return true; // link-local
+    if (v6.startsWith('::ffff:')) {
+      // IPv4-mapped: check the embedded v4 address
+      const embedded = v6.replace('::ffff:', '');
+      return net.isIPv4(embedded) ? isPrivateIp(embedded) : true; // unmappable -> reject
+    }
+    return false;
+  }
+  return false;
+}
+
+/** Resolves the URL's host and rejects private/internal targets. */
+async function assertPublicHost(imageUrl) {
+  const url = new URL(imageUrl);
+  const hostname = url.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+
+  // Literal IPs: check directly.
+  if (net.isIP(hostname)) {
+    if (isPrivateIp(hostname)) {
+      throw new SsrfBlockedError(`photo_url host ${hostname} is a private/internal address`);
+    }
+    return;
+  }
+
+  // Hostname: resolve (dns.lookup honors /etc/hosts, so "localhost" is caught).
+  const resolved = await new Promise((resolve, reject) => {
+    dns.lookup(hostname, { all: true }, (err, addrs) =>
+      err ? reject(err) : resolve(addrs.map((a) => a.address))
+    );
+  });
+  for (const ip of resolved) {
+    if (isPrivateIp(ip)) {
+      throw new SsrfBlockedError(
+        `photo_url host ${hostname} resolves to private/internal address ${ip}`
+      );
+    }
+  }
+}
+
+class SsrfBlockedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'SsrfBlockedError';
+  }
+}
+
 async function downloadImageAsBase64(imageUrl) {
+  await assertPublicHost(imageUrl);
   const res = await fetch(imageUrl);
   if (!res.ok) {
     throw new Error(`Failed to download photo for classification (HTTP ${res.status})`);
@@ -283,4 +358,4 @@ function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
-module.exports = { classifyIssuePhoto, generateComplaintText };
+module.exports = { classifyIssuePhoto, generateComplaintText, assertPublicHost };
